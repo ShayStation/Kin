@@ -7,7 +7,6 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/ThrowAimComponent.h"
 #include "Types/KinAbilityInputID.h"
-#include "Engine/Engine.h"
 
 UGA_Throw::UGA_Throw()
 {

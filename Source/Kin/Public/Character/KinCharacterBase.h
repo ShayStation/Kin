@@ -12,7 +12,7 @@
 #include "KinCharacterAttributeSet.h"
 #include "Components/ThrowAimComponent.h"
 
-
+#include "InputAction.h"
 #include "InputActionValue.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"

@@ -17,6 +17,8 @@
 #include "Logging/LogMacros.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Components/ThrowAimComponent.h"
+#include "Abilities/GA_Throw.h"
+#include "Types/KinAbilityInputID.h"
 
 
 
@@ -114,8 +116,18 @@ void AKinCharacterBase::BeginPlay()
 
     if (HasAuthority() && AbilitySystemComponent)
     {
+        // Grant one level of the Throw ability
+        AbilitySystemComponent->GiveAbility(
+            FGameplayAbilitySpec(
+                UGA_Throw::StaticClass(),                     // our new ability class
+                1,                                            // Level 1
+                static_cast<int32>(EKinAbilityInputID::Throw),// binds to EKinAbilityInputID::Throw
+                this                                          // source actor
+            )
+        );
+
+        // Ensure the ASC knows about this actor
         AbilitySystemComponent->InitAbilityActorInfo(this, this);
-        InitializeAbilities();
     }
 }
 
@@ -153,17 +165,6 @@ void AKinCharacterBase::Tick(float DeltaTime)
         CameraBoom->SetRelativeRotation(R);
     }
 
-    const FVector Vel = GetVelocity();
-    if (!Vel.IsNearlyZero())
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Tick Loc=%s | Vel=%s | Rot=%s | Mode=%d"),
-            *GetActorLocation().ToCompactString(),
-            *Vel.ToCompactString(),
-            *GetActorRotation().ToCompactString(),
-            (int32)GetCharacterMovement()->MovementMode
-        );
-    }
 }
 
 void AKinCharacterBase::NotifyControllerChanged()
@@ -179,11 +180,41 @@ void AKinCharacterBase::NotifyControllerChanged()
         }
     }
 }
+
+
+//void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+//{
+//    Super::SetupPlayerInputComponent(PlayerInputComponent);
+//
+//
+//    if (APlayerController* PC = Cast<APlayerController>(Controller))
+//    {
+//        if (UEnhancedInputLocalPlayerSubsystem* Sub =
+//            ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
+//        {
+//            Sub->AddMappingContext(DefaultMappingContext, 0);
+//        }
+//    }
+//
+//    if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
+//    {
+//        // 3) Bind all your IA_* actions here
+//        EIC->BindAction(IA_MoveForward, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveForward);
+//        EIC->BindAction(IA_MoveRight, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveRight);
+//        EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::Look);
+//        EIC->BindAction(ToggleZoomAction, ETriggerEvent::Started, this, &AKinCharacterBase::ToggleZoom);
+//        EIC->BindAction(SetOverheadAction, ETriggerEvent::Started, this, &AKinCharacterBase::SetOverheadView);
+//        EIC->BindAction(RotateCameraAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::RotateCamera);
+//
+//    }
+//}
+
 void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
     Super::SetupPlayerInputComponent(PlayerInputComponent);
+    StaticEnum<EKinAbilityInputID>();
 
-    // 1) Add the Enhanced Input Mapping Context first
+    // 1) Add your Enhanced Input Mapping Context
     if (APlayerController* PC = Cast<APlayerController>(Controller))
     {
         if (UEnhancedInputLocalPlayerSubsystem* Sub =
@@ -193,10 +224,24 @@ void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
         }
     }
 
-    // 2) Capture the EnhancedInputComponent
+    // 2) Bind GAS Ability activation to your input component
+    if (AbilitySystemComponent)
+        {
+        AbilitySystemComponent->BindAbilityActivationToInputComponent(
+            PlayerInputComponent,
+            FGameplayAbilityInputBinds(
+                TEXT("AbilityLocalInputPressed"),           // what to call on press
+                TEXT("AbilityLocalInputReleased"),          // what to call on release
+                TEXT("/Script/Kin.EKinAbilityInputID"),     // <— MUST be the full path name of your UENUM
+                static_cast<int32>(EKinAbilityInputID::None), // ConfirmID (we’re not using this auto-binding)
+                static_cast<int32>(EKinAbilityInputID::None)  // CancelID  (we’ll drive Throw via Enhanced Input)
+                 )
+             );
+        }
+
+    // 3) Bind all your IA_* Enhanced Input actions
     if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
     {
-        // 3) Bind all your IA_* actions here
         EIC->BindAction(IA_MoveForward, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveForward);
         EIC->BindAction(IA_MoveRight, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveRight);
         EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::Look);
@@ -205,10 +250,11 @@ void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
         EIC->BindAction(RotateCameraAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::RotateCamera);
 
 
-   
+        // 4) Bind Throw via GAS input callbacks
+        EIC->BindAction(IA_Throw,ETriggerEvent::Started,AbilitySystemComponent,&UAbilitySystemComponent::AbilityLocalInputPressed,static_cast<int32>(EKinAbilityInputID::Throw));
+        EIC->BindAction(IA_Throw,ETriggerEvent::Completed,AbilitySystemComponent,&UAbilitySystemComponent::AbilityLocalInputReleased,static_cast<int32>(EKinAbilityInputID::Throw));
     }
 }
-
 
 UAbilitySystemComponent* AKinCharacterBase::GetAbilitySystemComponent() const
 {
