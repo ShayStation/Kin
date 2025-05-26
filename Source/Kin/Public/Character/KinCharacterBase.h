@@ -10,6 +10,7 @@
 #include "GameplayAbilitySpec.h"                            // /Engine/Plugins/Runtime/GameplayAbilities/Source/GameplayAbilities/Public/GameplayAbilitySpec.h
 #include "GameplayEffectTypes.h"                            // /Engine/Plugins/Runtime/GameplayAbilities/Source/GameplayAbilities/Public/GameplayEffectTypes.h
 #include "KinCharacterAttributeSet.h"
+#include "Components/ThrowAimComponent.h"
 
 
 #include "InputActionValue.h"
@@ -49,7 +50,9 @@ protected:
     void MoveForward(const FInputActionValue& Value);
     void MoveRight(const FInputActionValue& Value);
 
-
+    //Components
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Throw")
+    UThrowAimComponent * ThrowAimComponent;
 
     // Grant default abilities
     void InitializeAbilities();
@@ -131,9 +134,6 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category = GAS, meta = (AllowPrivateAccess = "true"))
     TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
 
-    //Enhanced Input Subsystem
-
-
 
 
     // Occlusion settings
@@ -173,4 +173,7 @@ private:
     /** How quickly to interpolate zoom (higher = snappier) */
     UPROPERTY(EditAnywhere, Category = "Camera")
     float ZoomInterpSpeed = 10.f;
+
+public:
+    FORCEINLINE UThrowAimComponent* GetThrowAimComponent() const { return ThrowAimComponent; }
 };

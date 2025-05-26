@@ -16,6 +16,7 @@
 #include "Net/UnrealNetwork.h"
 #include "Logging/LogMacros.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Components/ThrowAimComponent.h"
 
 
 
@@ -81,6 +82,10 @@ AKinCharacterBase::AKinCharacterBase()
     AttributeSet = CreateDefaultSubobject<UKinCharacterAttributeSet>(TEXT("AttributeSet"));
 
     // GAS abilities
+
+    // Components
+    ThrowAimComponent = CreateDefaultSubobject<UThrowAimComponent>(TEXT("ThrowAimComponent"));
+
 
 }
 
