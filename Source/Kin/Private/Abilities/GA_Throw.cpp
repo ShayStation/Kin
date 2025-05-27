@@ -6,8 +6,10 @@
 #include "AbilitySystemComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/ThrowAimComponent.h"
+#include "Abilities/ThrownProjectile.h"
 #include "Types/KinAbilityInputID.h"
 #include "Engine/Engine.h"
+#include "Kismet/GameplayStatics.h"
 
 UGA_Throw::UGA_Throw()
 {
@@ -16,6 +18,14 @@ UGA_Throw::UGA_Throw()
     // Only run on server (spawning + physics)
     NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
 
+    //Auto find our BP_ThrownProjectile so ProjectileClass isn't null
+    static ConstructorHelpers::FClassFinder<AActor> ProjBP(
+    TEXT("/Game/Blueprints/Abilities/BP_ThrownProjectile")
+    );
+    if (ProjBP.Succeeded())
+        {
+        ProjectileClass = ProjBP.Class;
+        }
 }
 
 void UGA_Throw::ActivateAbility(
@@ -25,57 +35,55 @@ void UGA_Throw::ActivateAbility(
     const FGameplayEventData* TriggerEventData
 )
 {
-
-    if (GEngine && ActorInfo && ActorInfo->AvatarActor.IsValid())
-    {
-        FString CharName = ActorInfo->AvatarActor->GetName();
-        GEngine->AddOnScreenDebugMessage(
-            -1, 2.f, FColor::Emerald,
-            FString::Printf(TEXT("GA_Throw::ActivateAbility on %s"), *CharName)
-        );
-        UE_LOG(LogTemp, Warning, TEXT("GA_Throw activated by %s"), *CharName);
-    }
-
-    // 1) Commit cost/tags/etc.
     if (!CommitAbility(Handle, ActorInfo, ActivationInfo))
     {
         EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
         return;
     }
 
-    // 2) Server-only spawn + impulse
     AKinCharacterBase* Char = Cast<AKinCharacterBase>(ActorInfo->AvatarActor.Get());
-    if (Char && ProjectileClass && Char->HasAuthority())
+    if (!Char || !Char->HasAuthority())
     {
-        // 2a) Determine aim point via your ThrowAimComponent
-        FVector AimPoint, AimNormal;
-        Char->GetThrowAimComponent()->UpdateAimPoint(AimPoint, AimNormal, true);
+        EndAbility(Handle, ActorInfo, ActivationInfo, false, false);
+        return;
+    }
 
-        // 2b) Choose spawn location (e.g. hand socket)
-        const FVector SpawnLoc = Char->GetMesh()->GetSocketLocation(TEXT("ThrowSocket"));
-        // 2c) Compute launch rotation toward that point
-        const FRotator LaunchRot = (AimPoint - SpawnLoc).Rotation();
-
-        // 2d) Spawn the projectile actor
-        FActorSpawnParameters Params;
-        Params.Owner = Char;
-        Params.Instigator = Char;
-
-        if (AActor* Proj = Char->GetWorld()->SpawnActor<AActor>(
-            ProjectileClass, SpawnLoc, LaunchRot, Params
-        ))
+    UThrowAimComponent* AimComp = Char->FindComponentByClass<UThrowAimComponent>();
+    if (AimComp)
+    {
+        FVector Start, Velocity;
+        if (AimComp->ComputeThrow(Start, Velocity))
         {
-            // 2e) Apply impulse in its forward vector
-            if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(
-                Proj->GetComponentByClass(UPrimitiveComponent::StaticClass())))
+            FActorSpawnParameters Params;
+            Params.Owner = Char;
+            Params.Instigator = Char;
+
+            AThrownProjectile* Proj = Cast<AThrownProjectile>(
+                Char->GetWorld()->SpawnActor<AActor>(
+                    ProjectileClass,
+                    Start,
+                    Velocity.Rotation(),
+                    Params
+                )
+            );
+
+            if (Proj)
             {
-                Prim->AddImpulse(LaunchRot.Vector() * ThrowStrength, NAME_None, true);
+                Proj->InitTrajectory(
+                    Start,
+                    Velocity,
+                    AimComp->ProjectileGravityScale,
+                    AimComp->TimeScale  // use the tunable speed multiplier
+                );
+            }
+            else
+            {
+                UE_LOG(LogTemp, Error, TEXT("GA_Throw: failed to spawn projectile"));
             }
         }
     }
 
-    // 3) Immediately end the ability (no further tick)
-    EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/true, /*bWasCancelled=*/false);
+    EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
 }
 
 void UGA_Throw::EndAbility(

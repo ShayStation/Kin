@@ -18,7 +18,6 @@ class KIN_API UGA_Throw : public UGameplayAbility
 public:
     UGA_Throw();
 
-    // Called when the ability is activated
     virtual void ActivateAbility(
         const FGameplayAbilitySpecHandle Handle,
         const FGameplayAbilityActorInfo* ActorInfo,
@@ -26,7 +25,6 @@ public:
         const FGameplayEventData* TriggerEventData
     ) override;
 
-    // Called when the ability ends
     virtual void EndAbility(
         const FGameplayAbilitySpecHandle Handle,
         const FGameplayAbilityActorInfo* ActorInfo,
@@ -36,11 +34,20 @@ public:
     ) override;
 
 protected:
-    /** Projectile class to spawn */
+    // Class to spawn as the projectile
     UPROPERTY(EditDefaultsOnly, Category = "Throw")
     TSubclassOf<AActor> ProjectileClass;
 
-    /** Force applied to the projectile */
+    // Initial launch speed (used by SuggestProjectileVelocity)
     UPROPERTY(EditDefaultsOnly, Category = "Throw")
-    float ThrowStrength = 1200.f;
+    float LaunchSpeed = 1500.0f;
+
+    // Gravity scale on the projectile movement component
+    UPROPERTY(EditDefaultsOnly, Category = "Throw")
+    float ProjectileGravityScale = 0.4f;
+
+    // If >0, clamps the arc apex to this height above spawn
+    UPROPERTY(EditDefaultsOnly, Category = "Throw")
+    float MaxArcHeight = 500.0f;
+
 };
