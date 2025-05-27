@@ -51,8 +51,8 @@ void UGA_Throw::ActivateAbility(
     UThrowAimComponent* AimComp = Char->FindComponentByClass<UThrowAimComponent>();
     if (AimComp)
     {
-        FVector Start, Velocity;
-        if (AimComp->ComputeThrow(Start, Velocity))
+        FVector Start, Velocity, AimPoint;
+        if (AimComp->ComputeThrow(Start, Velocity, AimPoint))
         {
             FActorSpawnParameters Params;
             Params.Owner = Char;

@@ -21,7 +21,7 @@ public:
         FActorComponentTickFunction* ThisTickFunction
     ) override;
 
-    bool ComputeThrow(FVector& OutStart, FVector& OutVelocity);
+    bool ComputeThrow(FVector& OutStart, FVector& OutVelocity, FVector& OutAimPoint);
 
     UPROPERTY(EditAnywhere, Category = "Debug")
     bool bDebugDraw = true;
@@ -29,8 +29,8 @@ public:
     UPROPERTY(EditAnywhere, Category = "Throw")
     float MaxTraceDistance = 1500.0f;
 
-    UPROPERTY(EditAnywhere, Category = "Throw")
-    float SnapUpHeight = 300.0f;
+    //UPROPERTY(EditAnywhere, Category = "Throw")
+    //float SnapUpHeight = 300.0f;
 
     UPROPERTY(EditAnywhere, Category = "Throw")
     float LaunchSpeed = 1500.0f;
@@ -48,4 +48,18 @@ public:
     // 1.0 = real-time, >1 = faster, <1 = slower.
     UPROPERTY(EditAnywhere, Category = "Throw")
     float TimeScale = 1.0f;
+
+protected:
+    /** How far past a blocking wall the throw can still reach (so you always clear the lip) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Range")
+    float ClearanceBuffer = 100.0f;
+
+    /** How quickly the reticle’s range eases in/out (higher = snappier) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Range")
+    float RangeInterpSpeed = 10.0f;
+
+private:
+    /** Smoothed throw range we actually use each frame */
+    float CurrentEffectiveRange;
+
 };
