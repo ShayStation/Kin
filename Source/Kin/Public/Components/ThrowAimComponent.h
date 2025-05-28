@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Components/SplineComponent.h"
 #include "ThrowAimComponent.generated.h"
 
 
@@ -29,9 +30,6 @@ public:
     UPROPERTY(EditAnywhere, Category = "Throw")
     float MaxTraceDistance = 1500.0f;
 
-    //UPROPERTY(EditAnywhere, Category = "Throw")
-    //float SnapUpHeight = 300.0f;
-
     UPROPERTY(EditAnywhere, Category = "Throw")
     float LaunchSpeed = 1500.0f;
 
@@ -49,7 +47,6 @@ public:
     UPROPERTY(EditAnywhere, Category = "Throw")
     float TimeScale = 1.0f;
 
-protected:
     /** How far past a blocking wall the throw can still reach (so you always clear the lip) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Range")
     float ClearanceBuffer = 100.0f;
@@ -58,8 +55,27 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Range")
     float RangeInterpSpeed = 10.0f;
 
+    /** How many points to sample along the trajectory for ground projection */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Reticle")
+    int32 ReticleSampleCount = 16;
+
+    /** How far up above the trajectory point to start the downward trace */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Reticle")
+    float ReticleTraceHeight = 200.0f;
+
+
+
+protected:
+
+
 private:
     /** Smoothed throw range we actually use each frame */
     float CurrentEffectiveRange;
+
+    /** Samples the physics arc, projects each point to the ground, updates ReticleSpline */
+    void UpdateGroundReticle(
+        const FVector& SpawnStart,
+        const FVector& AimPoint
+    );
 
 };

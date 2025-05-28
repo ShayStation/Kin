@@ -6,23 +6,15 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Abilities/ThrownProjectile.h"
+#include "Components/SplineComponent.h"
 
 
-// --------------------------------------------------------------------------------
-// Constructor
-// --------------------------------------------------------------------------------
 UThrowAimComponent::UThrowAimComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
-    PrimaryComponentTick.bStartWithTickEnabled = true;
-
-    // initialize the smoothed range
     CurrentEffectiveRange = MaxTraceDistance;
 }
 
-// --------------------------------------------------------------------------------
-// TickComponent: draws debug and drives ComputeThrow each frame
-// --------------------------------------------------------------------------------
 void UThrowAimComponent::TickComponent(
     float DeltaTime,
     ELevelTick TickType,
@@ -39,9 +31,7 @@ void UThrowAimComponent::TickComponent(
     if (!World || !Owner)
         return;
 
-    //
-    // 1) Wall-distance trace to compute TargetRange ? smoothly lerp to CurrentEffectiveRange
-    //
+    // 1) Wall-distance trace ? smooth CurrentEffectiveRange
     UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
     FVector WallStart = Capsule
         ? Capsule->GetComponentLocation()
@@ -58,7 +48,7 @@ void UThrowAimComponent::TickComponent(
     );
 
     float DistanceToWall = bHitWall
-        ? FVector(WallHit.Location - WallStart).Size2D()
+        ? (WallHit.Location - WallStart).Size2D()
         : MaxTraceDistance;
 
     float TargetRange = FMath::Clamp(DistanceToWall + ClearanceBuffer, 0.0f, MaxTraceDistance);
@@ -69,38 +59,29 @@ void UThrowAimComponent::TickComponent(
         RangeInterpSpeed
     );
 
-    //
-    // 2) ComputeThrow ? gives us spawn start, launch velocity, AND final AimPoint
-    //
+    // 2) Compute throw (Start, Velocity, AimPoint)
     FVector SpawnStart, LaunchVelocity, AimPoint;
     if (!ComputeThrow(SpawnStart, LaunchVelocity, AimPoint))
         return;
 
-    //
-    // 3) Debug-draw: blue line of CurrentEffectiveRange, green landing sphere, yellow velocity arrow, white apex text
-    //
+    // 3) Debug: range line
+    FVector TraceStart = WallStart;
+    FVector TraceEnd = TraceStart + Owner->GetActorForwardVector() * CurrentEffectiveRange;
+    DrawDebugLine(World, TraceStart, TraceEnd, FColor::Blue, false, 0.0f, 0, 2.0f);
+
+    // 4) Debug: landing point
+    DrawDebugSphere(World, AimPoint, 8.0f, 12, FColor::Green, false, 0.0f);
+
+    // 5) Debug: velocity arrow
+    DrawDebugLine(
+        World,
+        SpawnStart,
+        SpawnStart + LaunchVelocity.GetSafeNormal() * 100.0f,
+        FColor::Yellow, false, 0.0f, 0, 2.0f
+    );
+
+    // 6) Debug: apex label
     {
-        // blue: clamped range line
-        FVector TraceStart = WallStart;
-        FVector TraceEnd = TraceStart + Owner->GetActorForwardVector() * CurrentEffectiveRange;
-        DrawDebugLine(World, TraceStart, TraceEnd, FColor::Blue, false, 0.0f, 0, 2.0f);
-
-        // green: landing point
-        DrawDebugSphere(World, AimPoint, 8.0f, 12, FColor::Green, false, 0.0f);
-
-        // yellow: direction arrow
-        DrawDebugLine(
-            World,
-            SpawnStart,
-            SpawnStart + LaunchVelocity.GetSafeNormal() * 100.0f,
-            FColor::Yellow,
-            false,
-            0.0f,
-            0,
-            2.0f
-        );
-
-        // white: apex height text
         float WorldG = -World->GetGravityZ();
         float EffG = WorldG * ProjectileGravityScale;
         float Apex = LaunchVelocity.Z * LaunchVelocity.Z / (2.0f * EffG);
@@ -108,41 +89,33 @@ void UThrowAimComponent::TickComponent(
             World,
             SpawnStart + FVector(0, 0, Apex),
             FString::Printf(TEXT("Apex: %.1f"), Apex),
-            nullptr,
-            FColor::White,
-            0.0f
+            nullptr, FColor::White, 0.0f
         );
     }
 
-    //
-    // 4) Debug-draw: physics-sampled trajectory in cyan
-    //
+    // 7) Ground-projected reticle polyline (horizontally sampled)
+    UpdateGroundReticle(SpawnStart, AimPoint);
+
+    // 8) Debug: physics?sampled trajectory (cyan)
     {
         const int32 Segs = 30;
-
-        // re-solve total flight time: descending root of quadratic
         float WorldG = -World->GetGravityZ();
         float g = WorldG * ProjectileGravityScale;
         float DeltaZ = AimPoint.Z - SpawnStart.Z;
         float Vz = LaunchVelocity.Z;
         float Discr = Vz * Vz - 2.0f * g * DeltaZ;
-        if (Discr <= 0.0f)
-            return;  // can't reach target
+        if (Discr <= 0.0f) return;
 
-        // descending solution: (Vz + sqrt(Vz^2 - 2g?Z)) / g
         float TotalT = (Vz + FMath::Sqrt(Discr)) / g;
-
         FVector PrevPt = SpawnStart;
+
         for (int32 i = 1; i <= Segs; ++i)
         {
-            // sample time (include TimeScale to match your projectile)
             float tSim = (float(i) / Segs) * TotalT * TimeScale;
-
-            // projectile kinematics: P = P0 + V0*t + 0.5*a*t^2
-            FVector GravityAccel = FVector(0, 0, World->GetGravityZ() * ProjectileGravityScale);
+            FVector GravAccel = FVector(0, 0, World->GetGravityZ() * ProjectileGravityScale);
             FVector Pt = SpawnStart
                 + LaunchVelocity * tSim
-                + 0.5f * GravityAccel * tSim * tSim;
+                + 0.5f * GravAccel * tSim * tSim;
 
             DrawDebugLine(World, PrevPt, Pt, FColor::Cyan, false, 0.0f, 0, 1.0f);
             PrevPt = Pt;
@@ -150,9 +123,6 @@ void UThrowAimComponent::TickComponent(
     }
 }
 
-// --------------------------------------------------------------------------------
-// ComputeThrow: solves for OutStart, OutVelocity, and final OutAimPoint on top of obstacles
-// --------------------------------------------------------------------------------
 bool UThrowAimComponent::ComputeThrow(
     FVector& OutStart,
     FVector& OutVelocity,
@@ -164,44 +134,37 @@ bool UThrowAimComponent::ComputeThrow(
     UWorld* World = Owner->GetWorld();
     if (!World) return false;
 
-    // 1) Spawn location at socket
+    // 1) Spawn at socket
     USkeletalMeshComponent* Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
     if (!Mesh) return false;
     OutStart = Mesh->GetSocketLocation(TEXT("ThrowSocket"));
 
-    // 2) Horizontal “wall” trace using CurrentEffectiveRange
+    // 2) Horizontal trace
     UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
     FVector TraceStart = Capsule
         ? Capsule->GetComponentLocation()
         : OutStart;
     FVector TraceEnd = TraceStart + Owner->GetActorForwardVector() * CurrentEffectiveRange;
 
-    FCollisionQueryParams Params(TEXT("ThrowTrace"), false, Owner);
     FHitResult Hit;
+    FCollisionQueryParams Params(TEXT("ThrowTrace"), false, Owner);
     bool bHit = World->LineTraceSingleByChannel(
-        Hit,
-        TraceStart,
-        TraceEnd,
-        ECC_WorldStatic,
-        Params
+        Hit, TraceStart, TraceEnd, ECC_WorldStatic, Params
     );
 
-    // compute horizontal landing XY and base Z
     FVector LandXY = TraceStart + Owner->GetActorForwardVector() * CurrentEffectiveRange;
-    float BaseZ = bHit
-        ? Hit.Location.Z
-        : TraceStart.Z;
+    float BaseZ = bHit ? Hit.Location.Z : TraceStart.Z;
 
-    // 3) Snap-up: shoot down from apex height above LandXY to get true top surface Z
-    float H = MaxArcHeight * ArcParam;                    // desired apex above OutStart
+    // 3) Snap-up using apex-driven trace
+    float H = MaxArcHeight * ArcParam;
     float g = -World->GetGravityZ() * ProjectileGravityScale;
-    float Vz = FMath::Sqrt(2.0f * g * H);                  // initial vertical speed
-    float UpZ0 = BaseZ + H;                                  // start Z for downward trace
+    float Vz = FMath::Sqrt(2.0f * g * H);
 
+    FVector UpStart = FVector(LandXY.X, LandXY.Y, BaseZ + H);
     FHitResult UpHit;
     if (World->LineTraceSingleByChannel(
         UpHit,
-        FVector(LandXY.X, LandXY.Y, UpZ0),
+        UpStart,
         FVector(LandXY.X, LandXY.Y, BaseZ),
         ECC_WorldStatic,
         Params
@@ -210,17 +173,15 @@ bool UThrowAimComponent::ComputeThrow(
         BaseZ = UpHit.Location.Z;
     }
 
-    // final AimPoint (XY + snapped Z)
     OutAimPoint = FVector(LandXY.X, LandXY.Y, BaseZ);
 
-    // 4) Solve for flight time to OutAimPoint (descending root)
+    // 4) Solve flight time & velocity
     float DeltaZ = OutAimPoint.Z - OutStart.Z;
     float Discr = Vz * Vz - 2.0f * g * DeltaZ;
     if (Discr < 0.0f) return false;
 
     float Time = (Vz + FMath::Sqrt(Discr)) / g;
 
-    // horizontal speed
     FVector Dir2D = FVector(OutAimPoint.X - OutStart.X, OutAimPoint.Y - OutStart.Y, 0.0f);
     float Dist2D = Dir2D.Size();
     if (Dist2D < KINDA_SMALL_NUMBER) return false;
@@ -230,4 +191,70 @@ bool UThrowAimComponent::ComputeThrow(
     OutVelocity = Dir2D * Vx + FVector(0, 0, Vz);
 
     return true;
+}
+
+void UThrowAimComponent::UpdateGroundReticle(
+    const FVector& SpawnStart,
+    const FVector& AimPoint
+)
+{
+    UWorld* World = GetWorld();
+    if (!World || ReticleSampleCount < 2)
+        return;
+
+    // Prepare horizontal direction vector
+    FVector Dir2D = (AimPoint - SpawnStart);
+    Dir2D.Z = 0.0f;
+    float TotalDist = Dir2D.Size();
+    if (TotalDist < KINDA_SMALL_NUMBER)
+        return;
+    Dir2D.Normalize();
+
+    // Sample along the horizontal line
+    TArray<FVector> GroundPoints;
+    GroundPoints.Reserve(ReticleSampleCount);
+
+    for (int32 i = 0; i < ReticleSampleCount; ++i)
+    {
+        float Alpha = float(i) / float(ReticleSampleCount - 1);
+        FVector HorizontalPt = SpawnStart + Dir2D * (TotalDist * Alpha);
+
+        // Project straight down
+        FVector TraceStart = HorizontalPt + FVector(0, 0, ReticleTraceHeight);
+        FVector TraceEnd = HorizontalPt - FVector(0, 0, ReticleTraceHeight);
+        FHitResult Hit;
+
+        FCollisionObjectQueryParams ObjParams;
+        ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);  // only static world
+        FCollisionQueryParams Params(TEXT("ReticleTrace"), false, GetOwner());
+
+        FVector GroundPt = HorizontalPt;
+        if (World->LineTraceSingleByObjectType(
+            Hit,
+            TraceStart,
+            TraceEnd,
+            ObjParams,
+            Params
+        ))
+        {
+            GroundPt = Hit.Location;
+        }
+
+        GroundPoints.Add(GroundPt);
+    }
+
+    // Draw a continuous green polyline
+    for (int32 i = 1; i < GroundPoints.Num(); ++i)
+    {
+        DrawDebugLine(
+            World,
+            GroundPoints[i - 1],
+            GroundPoints[i],
+            FColor::Emerald,
+            false,  // not persistent
+            0.0f,
+            0,
+            3.0f    // thickness
+        );
+    }
 }
