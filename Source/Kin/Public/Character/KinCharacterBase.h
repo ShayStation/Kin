@@ -68,20 +68,23 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
     float ZoomClose = 400.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
-    float ZoomNormal = 500.f;
+    float ZoomNormal = 600.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
-    float ZoomFar = 600.f;
+    float ZoomFar = 800.f;
 
     UPROPERTY(EditAnywhere, Category = "Camera|Zoom")
-    float BoomPitchClose = -20.0f;
+    float BoomPitchClose = -10.0f;
 
     /** Pitch the boom to when ZoomIndex==1 (normal) */
     UPROPERTY(EditAnywhere, Category = "Camera|Zoom")
-    float BoomPitchNormal = -25.0f;
+    float BoomPitchNormal = -30.0f;
 
     /** Pitch the boom to when ZoomIndex==2 (far) */
     UPROPERTY(EditAnywhere, Category = "Camera|Zoom")
-    float BoomPitchFar = -30.f;
+    float BoomPitchFar = -40.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Camera)
+    float OcclusionInterpSpeed = 10.f; // smoothing speed for occlusion adjustments
 
     float CameraPanSpeed = 100.f; // Speed for camera rotation input
 
@@ -107,6 +110,12 @@ protected:
     //UInputAction* JumpAction;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
     UInputAction* MoveAction;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+    UInputAction* IA_Move;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+    UInputAction* IA_Look;
+
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
     UInputAction* IA_MoveForward;
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
@@ -135,12 +144,9 @@ protected:
     TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
 
 
-
     // Occlusion settings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Camera)
     float OcclusionProbeRadius = 50.f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Camera)
-    float OcclusionInterpSpeed = 10.f; // smoothing speed for occlusion adjustments
 
 
 
@@ -172,7 +178,7 @@ private:
 
     /** How quickly to interpolate zoom (higher = snappier) */
     UPROPERTY(EditAnywhere, Category = "Camera")
-    float ZoomInterpSpeed = 10.f;
+    float ZoomInterpSpeed = 5.f;
 
 public:
     FORCEINLINE UThrowAimComponent* GetThrowAimComponent() const { return ThrowAimComponent; }

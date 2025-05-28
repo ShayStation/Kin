@@ -16,6 +16,10 @@ class KIN_API UThrowAimComponent : public UActorComponent
 public:
     UThrowAimComponent();
 
+    /** Raw 2D stick input (–1..+1 in X/Y) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aim")
+    FVector2D AimInput = FVector2D::ZeroVector;
+
     virtual void TickComponent(
         float DeltaTime,
         ELevelTick TickType,

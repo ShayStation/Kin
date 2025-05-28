@@ -22,7 +22,6 @@
 
 
 
-
 AKinCharacterBase::AKinCharacterBase()
 {
     PrimaryActorTick.bCanEverTick = true;
@@ -44,9 +43,13 @@ AKinCharacterBase::AKinCharacterBase()
     CameraBoom->SetRelativeLocation(FVector(0.f, 0.f, 80.f));
 
     // Manual camera control: do not inherit controller rotation
-    CameraBoom->bUsePawnControlRotation = false;
+    //CameraBoom->bUsePawnControlRotation = false;
+    //CameraBoom->bInheritPitch = false;
+    //CameraBoom->bInheritYaw = false;
+    //CameraBoom->bInheritRoll = false;
+    CameraBoom->bUsePawnControlRotation = true;
+    CameraBoom->bInheritYaw = true;
     CameraBoom->bInheritPitch = false;
-    CameraBoom->bInheritYaw = false;
     CameraBoom->bInheritRoll = false;
     CameraBoom->bEnableCameraLag = true;
     CameraBoom->CameraLagSpeed = 12.f;
@@ -181,34 +184,6 @@ void AKinCharacterBase::NotifyControllerChanged()
     }
 }
 
-
-//void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
-//{
-//    Super::SetupPlayerInputComponent(PlayerInputComponent);
-//
-//
-//    if (APlayerController* PC = Cast<APlayerController>(Controller))
-//    {
-//        if (UEnhancedInputLocalPlayerSubsystem* Sub =
-//            ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
-//        {
-//            Sub->AddMappingContext(DefaultMappingContext, 0);
-//        }
-//    }
-//
-//    if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
-//    {
-//        // 3) Bind all your IA_* actions here
-//        EIC->BindAction(IA_MoveForward, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveForward);
-//        EIC->BindAction(IA_MoveRight, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveRight);
-//        EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::Look);
-//        EIC->BindAction(ToggleZoomAction, ETriggerEvent::Started, this, &AKinCharacterBase::ToggleZoom);
-//        EIC->BindAction(SetOverheadAction, ETriggerEvent::Started, this, &AKinCharacterBase::SetOverheadView);
-//        EIC->BindAction(RotateCameraAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::RotateCamera);
-//
-//    }
-//}
-
 void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
     Super::SetupPlayerInputComponent(PlayerInputComponent);
@@ -244,7 +219,8 @@ void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
     {
         EIC->BindAction(IA_MoveForward, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveForward);
         EIC->BindAction(IA_MoveRight, ETriggerEvent::Triggered, this, &AKinCharacterBase::MoveRight);
-        EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::Look);
+        EIC->BindAction(IA_Move, ETriggerEvent::Triggered, this, &AKinCharacterBase::Move);
+        EIC->BindAction(IA_Look, ETriggerEvent::Triggered, this, &AKinCharacterBase::Look);
         EIC->BindAction(ToggleZoomAction, ETriggerEvent::Started, this, &AKinCharacterBase::ToggleZoom);
         EIC->BindAction(SetOverheadAction, ETriggerEvent::Started, this, &AKinCharacterBase::SetOverheadView);
         EIC->BindAction(RotateCameraAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::RotateCamera);
@@ -276,32 +252,82 @@ void AKinCharacterBase::InitializeAbilities()
 
 void AKinCharacterBase::Move(const FInputActionValue& Value)
 {
-    FVector2D Input = Value.Get<FVector2D>();
-    UE_LOG(LogTemp, Warning, TEXT("Move Input — X: %f   Y: %f"), Input.X, Input.Y);
+    // --- 1) Grab the raw TVector2<double>
+    const UE::Math::TVector2<double> RawD = Value.Get<UE::Math::TVector2<double>>();
 
+    // --- 2) Convert to float FVector2D
+    FVector2D RawInput((float)RawD.X, (float)RawD.Y);
 
-    if (!Input.IsNearlyZero())
+    // --- 3) Clamp to unit circle (|X,Y| ? 1)
+    float LenSq = RawInput.SizeSquared();
+    if (LenSq > 1.0f)
     {
-        const FRotator CameraRot = CameraBoom->GetComponentRotation();
-        const FRotator YawRot(0.f, CameraRot.Yaw, 0.f);
+        RawInput /= FMath::Sqrt(LenSq);
+    }
 
+    // --- 4) Decompose magnitude + direction
+    float Mag = RawInput.Size();
+    FVector2D Dir2D = (Mag > KINDA_SMALL_NUMBER)
+        ? RawInput / Mag
+        : FVector2D::ZeroVector;
+
+    // --- 5) Feed your AimComponent so the reticle follows even below threshold
+    if (ThrowAimComponent)
+    {
+        ThrowAimComponent->AimInput = RawInput;
+    }
+
+    // --- 6) Only move pawn past 0.65 stick deflection
+    const float Threshold = 0.65f;
+    if (Mag > Threshold && Controller)
+    {
+        // remap [Threshold…1.0] ? [0…1]
+        float Ramp = (Mag - Threshold) / (1.0f - Threshold);
+
+        // build world?space direction from control yaw
+        const FRotator YawRot(0.f, Controller->GetControlRotation().Yaw, 0.f);
         const FVector Forward = FRotationMatrix(YawRot).GetUnitAxis(EAxis::X);
         const FVector Right = FRotationMatrix(YawRot).GetUnitAxis(EAxis::Y);
+        const FVector DesiredDir = (Forward * Dir2D.Y + Right * Dir2D.X).GetSafeNormal();
 
-        // Y drives forward (W/S), X drives right (A/D)
-        AddMovementInput(Forward, Input.Y);
-        AddMovementInput(Right, Input.X);
+        // --- 7) Drive movement
+        AddMovementInput(DesiredDir, Ramp);
+
+        // --- 8) Optional: rotate character toward move dir
+        const float InterpSpeed = 10.f;
+        FRotator TargetRot = DesiredDir.Rotation();
+        FRotator NewRot = FMath::RInterpTo(
+            GetActorRotation(),
+            TargetRot,
+            GetWorld()->GetDeltaSeconds(),
+            InterpSpeed
+        );
+        SetActorRotation(NewRot);
     }
+    // below threshold: no pawn movement, but reticle still tracks RawInput
 }
-// If there's any movement input…
-//if (!Input.IsNearlyZero())
+
+// old function
+//void AKinCharacterBase::Move(const FInputActionValue& Value)
 //{
-//    // Movement independent of camera: world forward (+X) and right (+Y)
-//    const FVector Forward = FVector::ForwardVector; // (1,0,0)
-//    const FVector Right = FVector::RightVector;   // (0,1,0)
-//    AddMovementInput(Forward, Input.Y);
-//    AddMovementInput(Right, Input.X);
+//    FVector2D Input = Value.Get<FVector2D>();
+//    UE_LOG(LogTemp, Warning, TEXT("Move Input — X: %f   Y: %f"), Input.X, Input.Y);
+//
+//
+//    if (!Input.IsNearlyZero())
+//    {
+//        const FRotator CameraRot = CameraBoom->GetComponentRotation();
+//        const FRotator YawRot(0.f, CameraRot.Yaw, 0.f);
+//
+//        const FVector Forward = FRotationMatrix(YawRot).GetUnitAxis(EAxis::X);
+//        const FVector Right = FRotationMatrix(YawRot).GetUnitAxis(EAxis::Y);
+//
+//        // Y drives forward (W/S), X drives right (A/D)
+//        AddMovementInput(Forward, Input.Y);
+//        AddMovementInput(Right, Input.X);
+//    }
 //}
+
 
 void AKinCharacterBase::MoveForward(const FInputActionValue& Value)
 {
@@ -328,20 +354,27 @@ void AKinCharacterBase::MoveRight(const FInputActionValue& Value)
     AddMovementInput(Dir, Axis);
 }
 
-
-
 void AKinCharacterBase::Look(const FInputActionValue& Value)
 {
-    float YawInput = Value.Get<FVector2D>().X;
-    if (FMath::IsNearlyZero(YawInput)) return;
-
-
-    FRotator R = CameraBoom->GetRelativeRotation();
-
-    R.Yaw += YawInput;
-
-    CameraBoom->SetRelativeRotation(R);
+    // Grab just the X component (right stick horizontal)
+    float YawDelta = Value.Get<FVector2D>().X;
+    AddControllerYawInput(YawDelta);
+    // Intentionally *no* AddControllerPitchInput()
 }
+
+// old function
+//void AKinCharacterBase::Look(const FInputActionValue& Value)
+//{
+//    float YawInput = Value.Get<FVector2D>().X;
+//    if (FMath::IsNearlyZero(YawInput)) return;
+//
+//
+//    FRotator R = CameraBoom->GetRelativeRotation();
+//
+//    R.Yaw += YawInput;
+//
+//    CameraBoom->SetRelativeRotation(R);
+//}
 
 void AKinCharacterBase::ToggleZoom()
 {
@@ -362,7 +395,7 @@ void AKinCharacterBase::SetOverheadView()
 {
     bOverheadMode = !bOverheadMode;
     float Pitch = bOverheadMode ? -89.f : -25.f;
-    CameraBoom->SetRelativeRotation(FRotator(Pitch, 0.f, 0.f));
+    //CameraBoom->SetRelativeRotation(FRotator(Pitch, 0.f, 0.f));
 }
 
 void AKinCharacterBase::RotateCamera(const FInputActionValue& Value)
@@ -370,7 +403,7 @@ void AKinCharacterBase::RotateCamera(const FInputActionValue& Value)
     float YawInput = Value.Get<FVector2D>().X;
     FRotator R = CameraBoom->GetRelativeRotation();
     R.Yaw += YawInput * CameraPanSpeed * GetWorld()->GetDeltaSeconds();
-    CameraBoom->SetRelativeRotation(R);
+    //CameraBoom->SetRelativeRotation(R);
 }
 
 void AKinCharacterBase::UpdateCameraFraming()
