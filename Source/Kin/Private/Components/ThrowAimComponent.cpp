@@ -9,8 +9,6 @@
 #include "Components/SplineComponent.h"
 #include "GameFramework/PlayerController.h"
 
-
-
 UThrowAimComponent::UThrowAimComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
@@ -37,137 +35,234 @@ void UThrowAimComponent::TickComponent(
     if (!World || !Owner)
         return;
 
-    // —— ONE-TIME INIT: start at forward, zero range ——
+    // —— ONE-TIME INIT: start at forward, zero range, initialize cache
     if (!bHasInitializedAim)
     {
         SmoothedAimDirection = Owner->GetActorForwardVector();
         CurrentEffectiveRange = 0.f;
+        LastSmoothedAimDirection = SmoothedAimDirection;
+        LastEffectiveRange = 0.f;
+        LastSpawnStart = Owner->GetActorLocation();
+        LastLaunchVelocity = FVector::ZeroVector;
+        LastAimPoint = LastSpawnStart;
         bHasInitializedAim = true;
     }
 
-    // 1) Direction smoothing
-    FVector DesiredDir = SmoothedAimDirection;
-    if (AimInput.SizeSquared() > KINDA_SMALL_NUMBER)
+    // Read stick magnitude
+    const float AimMag = AimInput.Size();
+
+    // Precompute camera-yaw axes
+    FVector Forward, Right;
+    if (APlayerController* PC = Cast<APlayerController>(Owner->GetInstigatorController()))
     {
-        if (APlayerController* PC = Cast<APlayerController>(Owner->GetInstigatorController()))
+        float Yaw = PC->GetControlRotation().Yaw;
+        FRotator RotY = FRotator(0.f, Yaw, 0.f);
+        Forward = FRotationMatrix(RotY).GetUnitAxis(EAxis::X);
+        Right = FRotationMatrix(RotY).GetUnitAxis(EAxis::Y);
+    }
+    else
+    {
+        Forward = Owner->GetActorForwardVector();
+        Right = Owner->GetActorRightVector();
+    }
+
+    // — OUTWARD (stick > DeadZone) —
+    if (AimMag > DeadZone)
+    {
+        // 1) Direction smoothing (slowed)
+        FVector DesiredDir = SmoothedAimDirection;
+        if (AimInput.SizeSquared() > KINDA_SMALL_NUMBER)
         {
-            float Yaw = PC->GetControlRotation().Yaw;
-            FRotator YawRot(0.f, Yaw, 0.f);
-            FVector Forward = FRotationMatrix(YawRot).GetUnitAxis(EAxis::X);
-            FVector Right = FRotationMatrix(YawRot).GetUnitAxis(EAxis::Y);
             DesiredDir = (Forward * AimInput.Y + Right * AimInput.X).GetSafeNormal();
         }
-    }
-    SmoothedAimDirection = FMath::VInterpTo(
-        SmoothedAimDirection,
-        DesiredDir,
-        DeltaTime,
-        DirectionInterpSpeed
-    );
-
-    // 2) Range smoothing only when stick held; hold on release
-    float AimMag = AimInput.Size();
-    if (AimMag > KINDA_SMALL_NUMBER)
-    {
-        float Ratio = FMath::Min(AimMag / MovementThreshold, 1.f);
-        float TargetRange = Ratio * MaxTraceDistance;
-        CurrentEffectiveRange = FMath::FInterpTo(
-            CurrentEffectiveRange,
-            TargetRange,
+        SmoothedAimDirection = FMath::VInterpTo(
+            SmoothedAimDirection,
+            DesiredDir,
             DeltaTime,
-            RangeInterpSpeed
+            DirectionInterpSpeed * MovementSpeedModifier
         );
-    }
 
-    // 3) Hard wall-clamp cap
+        // 2) Range smoothing (slowed)
+        if (AimMag > KINDA_SMALL_NUMBER)
+        {
+            float Ratio = FMath::Min(AimMag / MovementThreshold, 1.f);
+            float TargetRange = Ratio * MaxTraceDistance;
+            CurrentEffectiveRange = FMath::FInterpTo(
+                CurrentEffectiveRange,
+                TargetRange,
+                DeltaTime,
+                RangeInterpSpeed * MovementSpeedModifier
+            );
+        }
+
+        // 3) Hard wall-clamp cap (ignore your own projectiles!)
+        UCapsuleComponent* Cap = Owner->FindComponentByClass<UCapsuleComponent>();
+        FVector Start = Cap
+            ? Cap->GetComponentLocation()
+            : Owner->GetActorLocation();
+
+        FHitResult Hit;
+        FCollisionQueryParams Params(TEXT("WallClamp"), false, Owner);
+        bool bHit = World->LineTraceSingleByChannel(
+            Hit,
+            Start,
+            Start + SmoothedAimDirection * MaxTraceDistance,
+            ECC_WorldStatic,
+            Params
+        );
+        // — **INSERT**: ignore hits against your thrown projectiles
+        if (bHit && Hit.GetActor() && Hit.GetActor()->IsA<AThrownProjectile>())
+        {
+            bHit = false;
+        }
+
+        float DistanceToWall2D = bHit
+            ? (Hit.Location - Start).Size2D()
+            : MaxTraceDistance;
+
+        float WallClampRange = FMath::Clamp(
+            DistanceToWall2D + ClearanceBuffer,
+            0.f,
+            MaxTraceDistance
+        );
+
+        // 4) Final range cap
+        float UseRange = FMath::Min(CurrentEffectiveRange, WallClampRange);
+        CurrentEffectiveRange = UseRange;
+
+        // 5) ComputeThrow + cache
+        FVector SpawnStart, LaunchVel, AimPt;
+        if (ComputeThrow(SpawnStart, LaunchVel, AimPt))
+        {
+            LastSmoothedAimDirection = SmoothedAimDirection;
+            LastEffectiveRange = UseRange;
+            LastSpawnStart = SpawnStart;
+            LastLaunchVelocity = LaunchVel;
+            LastAimPoint = AimPt;
+        }
+    }
+    // — INWARD (stick moved inward past PullThreshold) —
+    else if (AimMag > PullThreshold)
+    {
+        FVector WorldIn = (Forward * AimInput.Y + Right * AimInput.X).GetSafeNormal();
+        float   DotIn = FVector::DotProduct(WorldIn, LastSmoothedAimDirection);
+
+        if (DotIn < -PullThreshold)
+        {
+            // retract range (slowed)
+            float NewRange = FMath::FInterpTo(
+                LastEffectiveRange,
+                0.f,
+                DeltaTime,
+                RangeInterpSpeed * MovementSpeedModifier
+            );
+            CurrentEffectiveRange = NewRange;
+
+            // recompute throw & cache
+            FVector SpawnStart, LaunchVel, AimPt;
+            if (ComputeThrow(SpawnStart, LaunchVel, AimPt))
+            {
+                LastEffectiveRange = NewRange;
+                LastSpawnStart = SpawnStart;
+                LastLaunchVelocity = LaunchVel;
+                LastAimPoint = AimPt;
+                // SmoothedAimDirection remains locked
+            }
+        }
+    }
+    // — DEAD: stick in dead-zone & not pulling inward—do nothing, caches persist
+
+    // — RE-DRAW using cached values every frame —
     UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
     FVector Start = Capsule
         ? Capsule->GetComponentLocation()
         : Owner->GetActorLocation();
 
-    FHitResult Hit;
-    FCollisionQueryParams Params(TEXT("WallClamp"), false, Owner);
-    bool bHitWall = World->LineTraceSingleByChannel(
-        Hit,
-        Start,
-        Start + SmoothedAimDirection * MaxTraceDistance,
-        ECC_WorldStatic,
-        Params
-    );
-    float DistanceToWall2D = bHitWall
-        ? (Hit.Location - Start).Size2D()
-        : MaxTraceDistance;
-
-    float WallClampRange = FMath::Clamp(
-        DistanceToWall2D + ClearanceBuffer,
-        0.f,
-        MaxTraceDistance
-    );
-
-    // 4) Final range = min(smoothed, wall-clamp) and hold
-    float UseRange = FMath::Min(CurrentEffectiveRange, WallClampRange);
-    CurrentEffectiveRange = UseRange;
-
-    // 5) Compute throw (direction uses smoothed range)
-    FVector SpawnStart, LaunchVelocity, AimPoint;
-    if (!ComputeThrow(SpawnStart, LaunchVelocity, AimPoint))
-        return;
-
     // 6) Debug: range line
     DrawDebugLine(
         World,
         Start,
-        Start + SmoothedAimDirection * UseRange,
+        Start + LastSmoothedAimDirection * LastEffectiveRange,
         FColor::Blue,
-        false, 0.f, 0, 2.f
+        false,
+        0.f,
+        0,
+        2.f
     );
 
     // 7) Debug: landing point
-    DrawDebugSphere(World, AimPoint, 8.f, 12, FColor::Green, false, 0.f);
+    DrawDebugSphere(
+        World,
+        LastAimPoint,
+        8.f,
+        12,
+        FColor::Green,
+        false,
+        0.f
+    );
 
     // 8) Debug: velocity arrow
     DrawDebugLine(
         World,
-        SpawnStart,
-        SpawnStart + LaunchVelocity.GetSafeNormal() * 100.f,
+        LastSpawnStart,
+        LastSpawnStart + LastLaunchVelocity.GetSafeNormal() * 100.f,
         FColor::Yellow,
-        false, 0.f, 0, 2.f
+        false,
+        0.f,
+        0,
+        2.f
     );
 
     // 9) Debug: apex label
     {
         float WorldG = -World->GetGravityZ() * ProjectileGravityScale;
-        float Apex = FMath::Square(LaunchVelocity.Z) / (2.f * WorldG);
+        float Apex = FMath::Square(LastLaunchVelocity.Z) / (2.f * WorldG);
         DrawDebugString(
             World,
-            SpawnStart + FVector(0, 0, Apex),
+            LastSpawnStart + FVector(0, 0, Apex),
             FString::Printf(TEXT("Apex: %.1f"), Apex),
-            nullptr, FColor::White, 0.f
+            nullptr,
+            FColor::White,
+            0.f
         );
     }
 
     // 10) Ground-projected reticle
-    UpdateGroundReticle(SpawnStart, AimPoint);
+    UpdateGroundReticle(LastSpawnStart, LastAimPoint);
 
     // 11) Debug: sampled trajectory
-    const int32 Segs = ReticleSampleCount;
-    float WorldG = -World->GetGravityZ() * ProjectileGravityScale;
-    float DeltaZ = AimPoint.Z - SpawnStart.Z;
-    float Vz = LaunchVelocity.Z;
-    float Discr = (Vz * Vz) - 2.f * WorldG * DeltaZ;
-    if (Discr > 0.f)
     {
-        float TotalT = (Vz + FMath::Sqrt(Discr)) / WorldG;
-        FVector PrevPt = SpawnStart;
-        for (int32 i = 1; i <= Segs; ++i)
+        const int32 Segs = ReticleSampleCount;
+        float WorldG = -World->GetGravityZ() * ProjectileGravityScale;
+        float DeltaZ = LastAimPoint.Z - LastSpawnStart.Z;
+        float Vz = LastLaunchVelocity.Z;
+        float Discr = (Vz * Vz) - 2.f * WorldG * DeltaZ;
+
+        if (Discr > 0.f)
         {
-            float tSim = (float(i) / Segs) * TotalT * TimeScale;
-            FVector GravAccel = FVector(0, 0, -WorldG);
-            FVector Pt = SpawnStart
-                + LaunchVelocity * tSim
-                + 0.5f * GravAccel * tSim * tSim;
-            DrawDebugLine(World, PrevPt, Pt, FColor::Cyan, false, 0.f, 0, 1.f);
-            PrevPt = Pt;
+            float TotalT = (Vz + FMath::Sqrt(Discr)) / WorldG;
+            FVector Prev = LastSpawnStart;
+
+            for (int32 i = 1; i <= Segs; ++i)
+            {
+                float tSim = (float(i) / Segs) * TotalT * TimeScale;
+                FVector Grav(0, 0, -WorldG);
+                FVector Pt = LastSpawnStart
+                    + LastLaunchVelocity * tSim
+                    + 0.5f * Grav * tSim * tSim;
+
+                DrawDebugLine(
+                    World,
+                    Prev,
+                    Pt,
+                    FColor::Cyan,
+                    false,
+                    0.f,
+                    0,
+                    1.f
+                );
+                Prev = Pt;
+            }
         }
     }
 }
@@ -192,9 +287,22 @@ bool UThrowAimComponent::ComputeThrow(
     UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
     FVector TraceStart = Capsule ? Capsule->GetComponentLocation() : OutStart;
     FVector TraceEnd = TraceStart + SmoothedAimDirection * CurrentEffectiveRange;
+
     FHitResult Hit;
     FCollisionQueryParams Params(TEXT("ThrowTrace"), false, Owner);
-    bool bHit = World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_WorldStatic, Params);
+    bool bHit = World->LineTraceSingleByChannel(
+        Hit,
+        TraceStart,
+        TraceEnd,
+        ECC_WorldStatic,
+        Params
+    );
+    // — **INSERT**: ignore your own projectile hits
+    if (bHit && Hit.GetActor() && Hit.GetActor()->IsA<AThrownProjectile>())
+    {
+        bHit = false;
+    }
+
     FVector LandXY = TraceStart + SmoothedAimDirection * CurrentEffectiveRange;
     float BaseZ = bHit ? Hit.Location.Z : TraceStart.Z;
 
@@ -204,10 +312,23 @@ bool UThrowAimComponent::ComputeThrow(
     float VzInit = FMath::Sqrt(2.f * g * H);
     FVector UpStart = FVector(LandXY.X, LandXY.Y, BaseZ + H);
     FHitResult UpHit;
-    if (World->LineTraceSingleByChannel(UpHit, UpStart, FVector(LandXY.X, LandXY.Y, BaseZ), ECC_WorldStatic, Params))
+    // use a temp bool so we can ignore projectiles
+    bool bApexHit = World->LineTraceSingleByChannel(
+        UpHit,
+        UpStart,
+        FVector(LandXY.X, LandXY.Y, BaseZ),
+        ECC_WorldStatic,
+        Params
+    );
+    if (bApexHit && UpHit.GetActor() && UpHit.GetActor()->IsA<AThrownProjectile>())
+    {
+        // ignore projectile hit, do nothing
+    }
+    else if (bApexHit)
     {
         BaseZ = UpHit.Location.Z;
     }
+
     OutAimPoint = FVector(LandXY.X, LandXY.Y, BaseZ);
 
     // 4) Solve flight time & velocity
@@ -215,12 +336,14 @@ bool UThrowAimComponent::ComputeThrow(
     float Discr2 = VzInit * VzInit - 2.f * g * DeltaZ;
     if (Discr2 < 0.f) return false;
     float Time = (VzInit + FMath::Sqrt(Discr2)) / g;
+
     FVector Dir2D = FVector(OutAimPoint.X - OutStart.X, OutAimPoint.Y - OutStart.Y, 0.f);
     float Dist2D = Dir2D.Size();
     if (Dist2D < KINDA_SMALL_NUMBER) return false;
     Dir2D.Normalize();
+
     float Vx = Dist2D / Time;
-    OutVelocity = Dir2D * Vx + FVector(0, 0, VzInit);
+    OutVelocity = Dir2D * Vx + FVector(0.f, 0.f, VzInit);
     return true;
 }
 

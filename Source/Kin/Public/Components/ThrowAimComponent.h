@@ -103,4 +103,23 @@ private:
 
     /** Flag to ensure one-time initialization of smoothing */
     bool bHasInitializedAim = false;
+
+    UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DeadZone = 0.1f;
+
+    /** How far the stick must move inward (toward player) to start retracting */
+    UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float PullThreshold = 0.2f;
+
+    /** Multiplier to slow down both direction & range interp (0.0–1.0) */
+    UPROPERTY(EditAnywhere, Category = "Aim", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float MovementSpeedModifier = 0.5f;
+
+    /** Cached aim state once stick drops below DeadZone */
+    FVector LastSmoothedAimDirection = FVector::ForwardVector;
+    float   LastEffectiveRange = 0.f;
+    FVector LastSpawnStart = FVector::ZeroVector;
+    FVector LastLaunchVelocity = FVector::ZeroVector;
+    FVector LastAimPoint = FVector::ZeroVector;
+
 };
