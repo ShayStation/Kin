@@ -127,6 +127,9 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
     UInputAction* IA_Throw;
 
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+    UInputAction* IA_ManualLockOn;
+
     // Camera input actions
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
     UInputAction* ToggleZoomAction;
@@ -154,6 +157,9 @@ protected:
     void ToggleZoom();
     void SetOverheadView();
     void RotateCamera(const FInputActionValue& Value);
+    void PerformManualLock();
+    UFUNCTION()
+    void ToggleManualLock(const FInputActionValue& Value);
 
     // Camera helper methods
     void UpdateCameraFraming();

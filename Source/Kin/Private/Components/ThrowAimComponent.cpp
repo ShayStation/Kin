@@ -1,13 +1,21 @@
 #include "Components/ThrowAimComponent.h"
+
 #include "GameFramework/Actor.h"
+#include "Engine/OverlapResult.h"
+#include "CollisionShape.h"
+#include "Engine/EngineTypes.h"
 #include "Engine/World.h"
 #include "DrawDebugHelpers.h"
 #include "Kismet/GameplayStatics.h"
+
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
-#include "Abilities/ThrownProjectile.h"
+#include "Components/LockOnTargetComponent.h"
 #include "Components/SplineComponent.h"
+
+#include "Abilities/ThrownProjectile.h"
 #include "GameFramework/PlayerController.h"
+
 
 UThrowAimComponent::UThrowAimComponent()
 {
@@ -27,15 +35,47 @@ void UThrowAimComponent::TickComponent(
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    if (!bDebugDraw)
-        return;
-
     UWorld* World = GetWorld();
     AActor* Owner = GetOwner();
     if (!World || !Owner)
+    {
         return;
+    }
 
-    // —— ONE-TIME INIT: start at forward, zero range, initialize cache
+    // --- LOCK-ON LOGIC (always runs) ---
+    if (LockedTarget)
+    {
+        // auto-release if out of manual-lock range
+        float Dist = FVector::Dist(
+            LockedTarget->GetActorLocation(),
+            Owner->GetActorLocation()
+        );
+        if (Dist > ManualLockRange)
+        {
+            ReleaseManualLock();
+        }
+
+        // debug: persistent lock line
+        if (bDebugDraw)
+        {
+            DrawDebugLine(
+                World,
+                Owner->GetActorLocation(),
+                LockedTarget->GetActorLocation(),
+                FColor::Red,
+                false,
+                0.f,
+                0,
+                1.5f
+            );
+        }
+    }
+    else
+    {
+        PerformSoftLock(DeltaTime);
+    }
+
+    // —— ONE-TIME AIM INITIALIZATION ——  
     if (!bHasInitializedAim)
     {
         SmoothedAimDirection = Owner->GetActorForwardVector();
@@ -48,15 +88,21 @@ void UThrowAimComponent::TickComponent(
         bHasInitializedAim = true;
     }
 
-    // Read stick magnitude
+    // —— OPTIONAL: gate heavy throw-arc debug here ——  
+    if (!bDebugDraw)
+    {
+        return;
+    }
+
+    // — read stick input magnitude —
     const float AimMag = AimInput.Size();
 
-    // Precompute camera-yaw axes
+    // — compute camera-oriented axes —
     FVector Forward, Right;
     if (APlayerController* PC = Cast<APlayerController>(Owner->GetInstigatorController()))
     {
         float Yaw = PC->GetControlRotation().Yaw;
-        FRotator RotY = FRotator(0.f, Yaw, 0.f);
+        FRotator RotY(0.f, Yaw, 0.f);
         Forward = FRotationMatrix(RotY).GetUnitAxis(EAxis::X);
         Right = FRotationMatrix(RotY).GetUnitAxis(EAxis::Y);
     }
@@ -66,10 +112,10 @@ void UThrowAimComponent::TickComponent(
         Right = Owner->GetActorRightVector();
     }
 
-    // — OUTWARD (stick > DeadZone) —
+    // — OUTWARD (stick beyond DeadZone) —
     if (AimMag > DeadZone)
     {
-        // 1) Direction smoothing (slowed)
+        // 1) Smooth direction
         FVector DesiredDir = SmoothedAimDirection;
         if (AimInput.SizeSquared() > KINDA_SMALL_NUMBER)
         {
@@ -82,7 +128,7 @@ void UThrowAimComponent::TickComponent(
             DirectionInterpSpeed * MovementSpeedModifier
         );
 
-        // 2) Range smoothing (slowed)
+        // 2) Smooth range
         if (AimMag > KINDA_SMALL_NUMBER)
         {
             float Ratio = FMath::Min(AimMag / MovementThreshold, 1.f);
@@ -95,7 +141,7 @@ void UThrowAimComponent::TickComponent(
             );
         }
 
-        // 3) Hard wall-clamp cap (ignore your own projectiles!)
+        // 3) Wall clamp (ignore own projectiles)
         UCapsuleComponent* Cap = Owner->FindComponentByClass<UCapsuleComponent>();
         FVector Start = Cap
             ? Cap->GetComponentLocation()
@@ -110,7 +156,6 @@ void UThrowAimComponent::TickComponent(
             ECC_WorldStatic,
             Params
         );
-        // — **INSERT**: ignore hits against your thrown projectiles
         if (bHit && Hit.GetActor() && Hit.GetActor()->IsA<AThrownProjectile>())
         {
             bHit = false;
@@ -119,18 +164,17 @@ void UThrowAimComponent::TickComponent(
         float DistanceToWall2D = bHit
             ? (Hit.Location - Start).Size2D()
             : MaxTraceDistance;
-
         float WallClampRange = FMath::Clamp(
             DistanceToWall2D + ClearanceBuffer,
             0.f,
             MaxTraceDistance
         );
 
-        // 4) Final range cap
+        // 4) Apply clamp
         float UseRange = FMath::Min(CurrentEffectiveRange, WallClampRange);
         CurrentEffectiveRange = UseRange;
 
-        // 5) ComputeThrow + cache
+        // 5) Compute and cache throw
         FVector SpawnStart, LaunchVel, AimPt;
         if (ComputeThrow(SpawnStart, LaunchVel, AimPt))
         {
@@ -141,15 +185,14 @@ void UThrowAimComponent::TickComponent(
             LastAimPoint = AimPt;
         }
     }
-    // — INWARD (stick moved inward past PullThreshold) —
+    // — INWARD (stick past PullThreshold) —
     else if (AimMag > PullThreshold)
     {
         FVector WorldIn = (Forward * AimInput.Y + Right * AimInput.X).GetSafeNormal();
-        float   DotIn = FVector::DotProduct(WorldIn, LastSmoothedAimDirection);
+        float DotIn = FVector::DotProduct(WorldIn, LastSmoothedAimDirection);
 
         if (DotIn < -PullThreshold)
         {
-            // retract range (slowed)
             float NewRange = FMath::FInterpTo(
                 LastEffectiveRange,
                 0.f,
@@ -158,7 +201,6 @@ void UThrowAimComponent::TickComponent(
             );
             CurrentEffectiveRange = NewRange;
 
-            // recompute throw & cache
             FVector SpawnStart, LaunchVel, AimPt;
             if (ComputeThrow(SpawnStart, LaunchVel, AimPt))
             {
@@ -166,23 +208,22 @@ void UThrowAimComponent::TickComponent(
                 LastSpawnStart = SpawnStart;
                 LastLaunchVelocity = LaunchVel;
                 LastAimPoint = AimPt;
-                // SmoothedAimDirection remains locked
             }
         }
     }
-    // — DEAD: stick in dead-zone & not pulling inward—do nothing, caches persist
 
-    // — RE-DRAW using cached values every frame —
+    // — DRAW TRAJECTORY DEBUG based on cached values —
+
     UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
-    FVector Start = Capsule
+    FVector TraceStart = Capsule
         ? Capsule->GetComponentLocation()
         : Owner->GetActorLocation();
 
-    // 6) Debug: range line
+    // 6) Range line
     DrawDebugLine(
         World,
-        Start,
-        Start + LastSmoothedAimDirection * LastEffectiveRange,
+        TraceStart,
+        TraceStart + LastSmoothedAimDirection * LastEffectiveRange,
         FColor::Blue,
         false,
         0.f,
@@ -190,7 +231,7 @@ void UThrowAimComponent::TickComponent(
         2.f
     );
 
-    // 7) Debug: landing point
+    // 7) Landing point
     DrawDebugSphere(
         World,
         LastAimPoint,
@@ -201,7 +242,7 @@ void UThrowAimComponent::TickComponent(
         0.f
     );
 
-    // 8) Debug: velocity arrow
+    // 8) Velocity arrow
     DrawDebugLine(
         World,
         LastSpawnStart,
@@ -213,7 +254,7 @@ void UThrowAimComponent::TickComponent(
         2.f
     );
 
-    // 9) Debug: apex label
+    // 9) Apex label
     {
         float WorldG = -World->GetGravityZ() * ProjectileGravityScale;
         float Apex = FMath::Square(LastLaunchVelocity.Z) / (2.f * WorldG);
@@ -227,10 +268,10 @@ void UThrowAimComponent::TickComponent(
         );
     }
 
-    // 10) Ground-projected reticle
+    // 10) Ground reticle
     UpdateGroundReticle(LastSpawnStart, LastAimPoint);
 
-    // 11) Debug: sampled trajectory
+    // 11) Sampled trajectory
     {
         const int32 Segs = ReticleSampleCount;
         float WorldG = -World->GetGravityZ() * ProjectileGravityScale;
@@ -242,7 +283,6 @@ void UThrowAimComponent::TickComponent(
         {
             float TotalT = (Vz + FMath::Sqrt(Discr)) / WorldG;
             FVector Prev = LastSpawnStart;
-
             for (int32 i = 1; i <= Segs; ++i)
             {
                 float tSim = (float(i) / Segs) * TotalT * TimeScale;
@@ -267,6 +307,7 @@ void UThrowAimComponent::TickComponent(
     }
 }
 
+
 bool UThrowAimComponent::ComputeThrow(
     FVector& OutStart,
     FVector& OutVelocity,
@@ -275,6 +316,7 @@ bool UThrowAimComponent::ComputeThrow(
 {
     AActor* Owner = GetOwner();
     if (!Owner) return false;
+
     UWorld* World = Owner->GetWorld();
     if (!World) return false;
 
@@ -285,7 +327,9 @@ bool UThrowAimComponent::ComputeThrow(
 
     // 2) Horizontal trace using smoothed direction
     UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
-    FVector TraceStart = Capsule ? Capsule->GetComponentLocation() : OutStart;
+    FVector TraceStart = Capsule
+        ? Capsule->GetComponentLocation()
+        : OutStart;
     FVector TraceEnd = TraceStart + SmoothedAimDirection * CurrentEffectiveRange;
 
     FHitResult Hit;
@@ -297,7 +341,7 @@ bool UThrowAimComponent::ComputeThrow(
         ECC_WorldStatic,
         Params
     );
-    // — **INSERT**: ignore your own projectile hits
+    // ignore your own projectile hits
     if (bHit && Hit.GetActor() && Hit.GetActor()->IsA<AThrownProjectile>())
     {
         bHit = false;
@@ -306,13 +350,13 @@ bool UThrowAimComponent::ComputeThrow(
     FVector LandXY = TraceStart + SmoothedAimDirection * CurrentEffectiveRange;
     float BaseZ = bHit ? Hit.Location.Z : TraceStart.Z;
 
-    // 3) Snap-up using apex-driven trace
+    // 3) Apex?driven upward trace
     float H = MaxArcHeight * ArcParam;
     float g = -World->GetGravityZ() * ProjectileGravityScale;
     float VzInit = FMath::Sqrt(2.f * g * H);
     FVector UpStart = FVector(LandXY.X, LandXY.Y, BaseZ + H);
+
     FHitResult UpHit;
-    // use a temp bool so we can ignore projectiles
     bool bApexHit = World->LineTraceSingleByChannel(
         UpHit,
         UpStart,
@@ -322,7 +366,7 @@ bool UThrowAimComponent::ComputeThrow(
     );
     if (bApexHit && UpHit.GetActor() && UpHit.GetActor()->IsA<AThrownProjectile>())
     {
-        // ignore projectile hit, do nothing
+        // ignore projectile hit
     }
     else if (bApexHit)
     {
@@ -331,19 +375,20 @@ bool UThrowAimComponent::ComputeThrow(
 
     OutAimPoint = FVector(LandXY.X, LandXY.Y, BaseZ);
 
-    // 4) Solve flight time & velocity
+    // 4) Solve for flight time & velocity
     float DeltaZ = OutAimPoint.Z - OutStart.Z;
     float Discr2 = VzInit * VzInit - 2.f * g * DeltaZ;
     if (Discr2 < 0.f) return false;
     float Time = (VzInit + FMath::Sqrt(Discr2)) / g;
 
-    FVector Dir2D = FVector(OutAimPoint.X - OutStart.X, OutAimPoint.Y - OutStart.Y, 0.f);
+    FVector Dir2D(OutAimPoint.X - OutStart.X, OutAimPoint.Y - OutStart.Y, 0.f);
     float Dist2D = Dir2D.Size();
     if (Dist2D < KINDA_SMALL_NUMBER) return false;
     Dir2D.Normalize();
 
     float Vx = Dist2D / Time;
     OutVelocity = Dir2D * Vx + FVector(0.f, 0.f, VzInit);
+
     return true;
 }
 
@@ -355,12 +400,14 @@ void UThrowAimComponent::UpdateGroundReticle(
     UWorld* World = GetWorld();
     if (!World || ReticleSampleCount < 2) return;
 
+    // Flatten direction to XY plane
     FVector Dir2D = AimPoint - SpawnStart;
     Dir2D.Z = 0.f;
     float TotalDist = Dir2D.Size();
     if (TotalDist < KINDA_SMALL_NUMBER) return;
     Dir2D.Normalize();
 
+    // Sample points along the trajectory footprint
     TArray<FVector> GroundPoints;
     GroundPoints.Reserve(ReticleSampleCount);
 
@@ -370,9 +417,13 @@ void UThrowAimComponent::UpdateGroundReticle(
         FVector HorizontalPt = SpawnStart + Dir2D * (TotalDist * Alpha);
         FVector TraceStart = HorizontalPt + FVector(0, 0, ReticleTraceHeight);
         FVector TraceEnd = HorizontalPt - FVector(0, 0, ReticleTraceHeight);
+
         FHitResult Hit;
         FCollisionObjectQueryParams ObjParams;
+        ObjParams.AddObjectTypesToQuery(ECC_Pawn);
+        ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
         ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
         FCollisionQueryParams Params(TEXT("ReticleTrace"), false, GetOwner());
         FVector GroundPt = HorizontalPt;
         if (World->LineTraceSingleByObjectType(Hit, TraceStart, TraceEnd, ObjParams, Params))
@@ -382,6 +433,7 @@ void UThrowAimComponent::UpdateGroundReticle(
         GroundPoints.Add(GroundPt);
     }
 
+    // Draw debug lines between sampled ground points
     for (int32 i = 1; i < GroundPoints.Num(); ++i)
     {
         DrawDebugLine(
@@ -396,3 +448,174 @@ void UThrowAimComponent::UpdateGroundReticle(
         );
     }
 }
+
+
+void UThrowAimComponent::PerformSoftLock(float DeltaTime)
+{
+    // 1) Compute current aim point
+    FVector AimPoint, SpawnStart, LaunchVel;
+    if (!ComputeThrow(SpawnStart, LaunchVel, AimPoint))
+    {
+        SoftLockTarget = nullptr;
+        return;
+    }
+
+    // 2) Sphere-overlap around the aim point, including static, dynamic, and pawn objects
+    TArray<FOverlapResult> Hits;
+    FCollisionShape Sphere = FCollisionShape::MakeSphere(SoftLockRadius);
+
+    FCollisionObjectQueryParams ObjParams;
+    ObjParams.AddObjectTypesToQuery(ECC_Pawn);
+    ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+    ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
+    GetWorld()->OverlapMultiByObjectType(
+        Hits,
+        AimPoint,
+        FQuat::Identity,
+        ObjParams,
+        Sphere
+    );
+
+    // 3) Find the closest lock-on candidate
+    AActor* Best = nullptr;
+    float    BestDist = SoftLockRadius;
+
+    for (auto& Result : Hits)
+    {
+        AActor* Candidate = Result.GetActor();
+        if (!Candidate) continue;
+
+        if (Candidate->FindComponentByClass<ULockOnTargetComponent>())
+        {
+            float Dist = FVector::Dist(Candidate->GetActorLocation(), AimPoint);
+            if (Dist < BestDist)
+            {
+                BestDist = Dist;
+                Best = Candidate;
+            }
+        }
+    }
+
+    // 4) Store and (optionally) debug-draw
+    SoftLockTarget = Best;
+
+    if (bDebugDraw && SoftLockTarget)
+    {
+        DrawDebugSphere(
+            GetWorld(),
+            SoftLockTarget->GetActorLocation(),
+            30.f,        // radius
+            12,          // segments
+            FColor::Green,
+            false,       // persistent
+            0.1f,        // lifeTime
+            0,
+            2.f          // thickness
+        );
+    }
+}
+
+
+void UThrowAimComponent::PerformManualLock()
+{
+    // 1) Don’t re-lock if already have one
+    if (LockedTarget)
+    {
+        return;
+    }
+
+    // 2) Gather all lockable actors in range
+    TArray<FOverlapResult> Hits;
+    FCollisionShape Sphere = FCollisionShape::MakeSphere(ManualLockRange);
+
+    FCollisionObjectQueryParams ObjParams;
+    ObjParams.AddObjectTypesToQuery(ECC_Pawn);
+    ObjParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+    ObjParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
+    GetWorld()->OverlapMultiByObjectType(
+        Hits,
+        GetOwner()->GetActorLocation(),
+        FQuat::Identity,
+        ObjParams,
+        Sphere
+    );
+
+    // 3) Score and pick the best candidate
+    AActor* Best = nullptr;
+    float    BestScore = -1.f;
+
+    for (const FOverlapResult& R : Hits)
+    {
+        AActor* Candidate = R.GetActor();
+        if (!Candidate)
+        {
+            continue;
+        }
+
+        if (ULockOnTargetComponent* LC = Candidate->FindComponentByClass<ULockOnTargetComponent>())
+        {
+            float Dist = FVector::Dist(
+                Candidate->GetActorLocation(),
+                GetOwner()->GetActorLocation()
+            );
+            float Score = LC->LockPriority / Dist;
+            if (Score > BestScore)
+            {
+                BestScore = Score;
+                Best = Candidate;
+            }
+        }
+    }
+
+    // 4) Lock onto it (and debug?draw)
+    if (Best)
+    {
+        LockedTarget = Best;
+
+        if (bDebugDraw)
+        {
+            DrawDebugSphere(
+                GetWorld(),
+                LockedTarget->GetActorLocation(),
+                60.f,        // radius
+                16,          // segments
+                FColor::Red, // color
+                false,       // persistent? 
+                2.0f,        // lifeTime
+                0,
+                3.f          // thickness
+            );
+
+            UE_LOG(LogTemp, Warning, TEXT("PerformManualLock(): locked onto %s"),
+                *LockedTarget->GetName());
+        }
+    }
+}
+
+
+void UThrowAimComponent::ReleaseManualLock()
+{
+    // 1) Clear the locked target
+    LockedTarget = nullptr;
+
+    // 2) (Optional) Debug indication of unlock
+    if (bDebugDraw)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("ReleaseManualLock(): target unlocked"));
+        // Example: small white sphere at player location
+        DrawDebugSphere(
+            GetWorld(),
+            GetOwner()->GetActorLocation(),
+            40.f,          // radius
+            12,            // segments
+            FColor::White, // color
+            false,         // persistent
+            1.0f,          // lifeTime
+            0,
+            2.f            // thickness
+        );
+    }
+}
+

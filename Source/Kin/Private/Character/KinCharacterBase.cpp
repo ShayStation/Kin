@@ -225,6 +225,8 @@ void AKinCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
         EIC->BindAction(SetOverheadAction, ETriggerEvent::Started, this, &AKinCharacterBase::SetOverheadView);
         EIC->BindAction(RotateCameraAction, ETriggerEvent::Triggered, this, &AKinCharacterBase::RotateCamera);
 
+        EIC->BindAction(IA_ManualLockOn, ETriggerEvent::Triggered, this, &AKinCharacterBase::ToggleManualLock);
+
 
         // 4) Bind Throw via GAS input callbacks
         EIC->BindAction(IA_Throw,ETriggerEvent::Started,AbilitySystemComponent,&UAbilitySystemComponent::AbilityLocalInputPressed,static_cast<int32>(EKinAbilityInputID::Throw));
@@ -404,6 +406,31 @@ void AKinCharacterBase::RotateCamera(const FInputActionValue& Value)
     FRotator R = CameraBoom->GetRelativeRotation();
     R.Yaw += YawInput * CameraPanSpeed * GetWorld()->GetDeltaSeconds();
     //CameraBoom->SetRelativeRotation(R);
+}
+
+void AKinCharacterBase::PerformManualLock()
+{
+    if (ThrowAimComponent)
+    {
+        ThrowAimComponent->PerformManualLock();
+    }
+}
+
+void AKinCharacterBase::ToggleManualLock(const FInputActionValue& Value)
+{
+    if (!ThrowAimComponent) return;
+
+    // Check if we’re currently manual-locked
+    if (ThrowAimComponent->GetLockedTarget())
+    {
+        // Already locked ? unlock
+        ThrowAimComponent->ReleaseManualLock();
+    }
+    else
+    {
+        // Not locked ? perform manual lock
+        ThrowAimComponent->PerformManualLock();
+    }
 }
 
 void AKinCharacterBase::UpdateCameraFraming()

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Components/SplineComponent.h"
+#include "Components/LockOnTargetComponent.h"
 #include "ThrowAimComponent.generated.h"
 
 
@@ -90,12 +91,35 @@ public:
         FVector& OutAimPoint
     );
 
+    /** Soft-lock will snap aim to any target within this radius */
+    UPROPERTY(EditAnywhere, Category = "LockOn")
+    float SoftLockRadius = 400.f;
+
+    /** How far you can manual-lock before dropping target */
+    UPROPERTY(EditAnywhere, Category = "LockOn")
+    float ManualLockRange = 2000.f;
+
+    /** Updates cursor snap each frame when no manual lock */
+    void PerformSoftLock(float DeltaTime);
+
+    /** Called on LockOn input press */
+    void PerformManualLock();
+
+    /** Called on LockOn input release or range breach */
+    void ReleaseManualLock();
+
+    AActor* GetLockedTarget() const
+    {
+        return LockedTarget;
+    }
 protected:
     /** Samples the physics arc, projects each point to the ground, updates spline */
     void UpdateGroundReticle(
         const FVector& SpawnStart,
         const FVector& AimPoint
     );
+
+
 
 private:
     /** Smoothed throw range we actually use each frame */
@@ -121,5 +145,13 @@ private:
     FVector LastSpawnStart = FVector::ZeroVector;
     FVector LastLaunchVelocity = FVector::ZeroVector;
     FVector LastAimPoint = FVector::ZeroVector;
+
+    /** Closest valid auto-target under cursor */
+    UPROPERTY()
+    AActor* SoftLockTarget = nullptr;
+
+    /** Persistently held when manual-locked */
+    UPROPERTY()
+    AActor* LockedTarget = nullptr;
 
 };
